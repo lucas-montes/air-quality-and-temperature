@@ -26,7 +26,7 @@ fn main() -> ! {
     log::info!("Hello world!");
 
     // Set GPIO0 as an output, and set its state high initially.
-    let mut led = Output::new(peripherals.GPIO0, Level::High, OutputConfig::default());
+    let mut led = Output::new(peripherals.GPIO4, Level::High, OutputConfig::default());
     log::info!("Hello world!");
     loop {
         led.toggle();
