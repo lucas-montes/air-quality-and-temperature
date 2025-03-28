@@ -1,17 +1,15 @@
-# [unstable]
-# build-std = ["core"]
-# [build]
-# target = "xtensa-esp32-none-elf"
-# rustflags = ["-C", "link-arg=-nostartfiles"]
-# [env]
-# ESP_LOG="info"
-
-[target.xtensa-esp32-none-elf]
-linker = "xtensa-esp32-elf-gcc"
-rustflags = [
-    "-C", "link-arg=-nostartfiles",
-    "-C", "default-linker-libraries",
-]
-
+[unstable]
+build-std = ["core"]
 [build]
 target = "xtensa-esp32-none-elf"
+rustflags = [
+  # GNU LD
+  "-C", "link-arg=-Wl,-Tlinkall.x",
+  "-C", "link-arg=-nostartfiles",
+
+  # LLD
+  # "-C", "link-arg=-Tlinkall.x",
+  # "-C", "linker=rust-lld",
+]
+[env]
+ESP_LOG="info"

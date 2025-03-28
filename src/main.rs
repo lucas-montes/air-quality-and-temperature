@@ -17,9 +17,13 @@ fn panic(_: &core::panic::PanicInfo) -> ! {
 
 #[main]
 fn main() -> ! {
+    log::info!("Hello world!");
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
+    log::info!("Hello world!");
     let peripherals = esp_hal::init(config);
+    log::info!("Hello world!");
     esp_println::logger::init_logger_from_env();
+    log::info!("Hello world!");
     // Set GPIO0 as an output, and set its state high initially.
     let mut led = Output::new(peripherals.GPIO0, Level::High, OutputConfig::default());
     log::info!("Hello world!");

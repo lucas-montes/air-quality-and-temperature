@@ -296,6 +296,7 @@ dependencies = [
  "esp32",
  "fugit",
  "instability",
+ "log",
  "nb",
  "paste",
  "portable-atomic",
