@@ -26,7 +26,7 @@ fn main() -> ! {
     let button = Input::new(peripherals.GPIO5, InputConfig::default());
     let mut led = Output::new(peripherals.GPIO4, Level::Low, OutputConfig::default());
     loop {
-        if button.is_high() {
+        if button.is_low() {
             self_led.toggle();
             led.set_high();
         } else {
