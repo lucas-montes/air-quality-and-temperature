@@ -3,7 +3,7 @@
 
 use esp_hal::{
     clock::CpuClock,
-    gpio::{Level, Output, OutputConfig},
+    gpio::{Input, InputConfig, Level, Output, OutputConfig},
     main,
     time::{Duration, Instant},
 };
@@ -19,19 +19,21 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
 #[main]
 fn main() -> ! {
     esp_println::logger::init_logger_from_env();
-    log::info!("Hello world!");
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
-    log::info!("Hello world!");
     let peripherals = esp_hal::init(config);
-    log::info!("Hello world!");
 
-    // Set GPIO0 as an output, and set its state high initially.
-    let mut led = Output::new(peripherals.GPIO4, Level::High, OutputConfig::default());
-    log::info!("Hello world!");
+    let mut self_led = Output::new(peripherals.GPIO2, Level::Low, OutputConfig::default());
+    let button = Input::new(peripherals.GPIO5, InputConfig::default());
+    let mut led = Output::new(peripherals.GPIO4, Level::Low, OutputConfig::default());
     loop {
-        led.toggle();
-        // Wait for half a second
+        if button.is_high() {
+            self_led.toggle();
+            led.set_high();
+        } else {
+            self_led.set_high();
+            led.toggle();
+        };
         let delay_start = Instant::now();
-        while delay_start.elapsed() < Duration::from_millis(500) {}
+        while delay_start.elapsed() < Duration::from_millis(250) {}
     }
 }

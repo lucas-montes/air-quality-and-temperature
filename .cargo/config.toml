@@ -1,5 +1,6 @@
 [unstable]
 build-std = ["core"]
+
 [build]
 target = "xtensa-esp32-none-elf"
 rustflags = [
@@ -11,5 +12,9 @@ rustflags = [
   # "-C", "link-arg=-Tlinkall.x",
   # "-C", "linker=rust-lld",
 ]
+
 [env]
 ESP_LOG="info"
+
+[target.xtensa-esp32-none-elf]
+runner = "espflash flash --monitor"
