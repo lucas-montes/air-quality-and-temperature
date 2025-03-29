@@ -2,3 +2,6 @@
 .direnv/
 .cargo/registry/
 .rustup/
+.cargo/*
+!.cargo/config.toml
+rust-toolchain.env
