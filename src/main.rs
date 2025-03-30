@@ -26,12 +26,12 @@ fn main() -> ! {
     let button = Input::new(peripherals.GPIO5, InputConfig::default());
     let mut led = Output::new(peripherals.GPIO4, Level::Low, OutputConfig::default());
     loop {
-        if button.is_low() {
+        if button.is_high() {
             self_led.toggle();
-            led.set_high();
+            led.toggle();
         } else {
             self_led.set_high();
-            led.toggle();
+            led.set_high();
         };
         let delay_start = Instant::now();
         while delay_start.elapsed() < Duration::from_millis(250) {}
