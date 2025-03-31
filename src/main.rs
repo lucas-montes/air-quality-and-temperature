@@ -1,12 +1,14 @@
 #![no_std]
 #![no_main]
 
+mod dht11;
+
 use esp_hal::{
-    clock::CpuClock,
-    gpio::{Input, InputConfig, Level, Output, OutputConfig},
-    main,
-    time::{Duration, Instant},
+    clock::CpuClock, delay::Delay, gpio::{ Flex,  Level, Output, OutputConfig, Pull}, main, time::{Duration, Instant}
 };
+
+
+use dht11::Dht11;
 
 // You need a panic handler. Usually, you you would use esp_backtrace, panic-probe, or
 // something similar, but you can also bring your own like this:
@@ -23,17 +25,29 @@ fn main() -> ! {
     let peripherals = esp_hal::init(config);
 
     let mut self_led = Output::new(peripherals.GPIO2, Level::Low, OutputConfig::default());
-    let button = Input::new(peripherals.GPIO5, InputConfig::default());
-    let mut led = Output::new(peripherals.GPIO4, Level::Low, OutputConfig::default());
+
+    let delay = Delay::new();
+
+
+    let mut capteur = Flex::new(peripherals.GPIO5);
+    capteur.set_as_open_drain(Pull::None);
+
+
+    let mut dht11 = Dht11::new(capteur, delay);
+
+
     loop {
-        if button.is_high() {
-            self_led.toggle();
-            led.toggle();
-        } else {
-            self_led.set_high();
-            led.set_high();
-        };
         let delay_start = Instant::now();
-        while delay_start.elapsed() < Duration::from_millis(250) {}
+        while delay_start.elapsed() < Duration::from_millis(500) {}
+        self_led.toggle();
+        match dht11.read() {
+            Ok(sensor_reading) => log::info!(
+                "DHT 11 Sensor - {}",
+                sensor_reading
+            ),
+            Err(error) => log::error!("An error occurred while trying to read sensor: {:?}", error),
+        }
+
+        log::info!("-----");
     }
 }
