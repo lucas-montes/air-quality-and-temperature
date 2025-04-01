@@ -5,6 +5,8 @@ use embedded_hal::{
     digital::{ InputPin, OutputPin, PinState},
 };
 
+//// From embedded-dht-rs = { version = "0.4.0", features = ["dht11"] }
+//// Info pins https://www.upesy.fr/blogs/tutorials/dht11-humidity-temperature-sensor-with-arduino-code-on-esp32-board
 
 /// Possible errors when interacting with the sensor.
 #[derive(Debug)]

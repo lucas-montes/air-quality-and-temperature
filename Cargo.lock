@@ -209,15 +209,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "embedded-dht-rs"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0b274db5ac4b19bcee3bb492f52ebb5153a3495a3a6e22c9f616f8778df9dc89"
-dependencies = [
- "embedded-hal 1.0.0",
-]
-
-[[package]]
 name = "embedded-hal"
 version = "0.2.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -599,6 +590,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "78ca9ab1a0babb1e7d5695e3530886289c18cf2f87ec19a575a0abdce112e3a3"
 
 [[package]]
+name = "micromath"
+version = "2.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c3c8dda44ff03a2f238717214da50f65d5a53b45cd213a7370424ffdb6fae815"
+
+[[package]]
 name = "minijinja"
 version = "2.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -767,12 +764,12 @@ checksum = "eded382c5f5f786b989652c49544c4877d9f015cc22e145a5ea8ea66c2921cd2"
 name = "rusty"
 version = "0.1.0"
 dependencies = [
- "embedded-dht-rs",
  "embedded-hal 1.0.0",
  "esp-backtrace",
  "esp-hal",
  "esp-println",
  "log",
+ "micromath",
 ]
 
 [[package]]
