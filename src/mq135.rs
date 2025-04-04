@@ -56,7 +56,7 @@ impl<'a, D: DelayNs> MQ135<'a, D> {
 
     /// Read the raw ADC value (equivalent to analogRead)
     fn read_adc(&mut self) -> Result<u16, SensorError> {
-        self.delay.delay_ms(50);
+        self.delay.delay_ms(250);
         self.adc.read_oneshot(&mut self.pin).map_err(|err| {log::error!("An error occurred while trying to read ADC: {:?}", err);SensorError::PinError})
 
     }

@@ -2,7 +2,7 @@ use core::fmt::Display;
 
 use embedded_hal::{
     delay::DelayNs,
-    digital::{ InputPin, OutputPin, PinState},
+    digital::{InputPin, OutputPin, PinState},
 };
 
 //// From embedded-dht-rs = { version = "0.4.0", features = ["dht11"] }
@@ -13,7 +13,7 @@ use embedded_hal::{
 pub enum SensorError {
     ChecksumMismatch,
     Timeout,
-    PinError
+    PinError,
 }
 
 const DEFAULT_MAX_ATTEMPTS: usize = 10_000;
@@ -50,13 +50,13 @@ impl<P: InputPin + OutputPin, D: DelayNs> Dht<P, D> {
     pub fn read_byte(&mut self) -> Result<u8, SensorError> {
         let mut byte: u8 = 0;
         for n in 0..8 {
-            let _ = self.wait_until_state(PinState::High);
+            self.wait_until_state(PinState::High)?;
             self.delay.delay_us(30);
             let is_bit_1 = self.pin.is_high();
             if is_bit_1.unwrap() {
                 let bit_mask = 1 << (7 - (n % 8));
                 byte |= bit_mask;
-                let _ = self.wait_until_state(PinState::Low);
+                self.wait_until_state(PinState::Low)?;
             }
         }
         Ok(byte)
@@ -87,15 +87,13 @@ impl<P: InputPin + OutputPin, D: DelayNs> Dht<P, D> {
             match is_state {
                 Ok(true) => return Ok(()),
                 Ok(false) => self.delay.delay_us(1),
-                Err(_) => return Err(SensorError::PinError)
+                Err(_) => return Err(SensorError::PinError),
             }
         }
 
         Err(SensorError::Timeout)
     }
 }
-
-
 
 pub struct Dht11<P: InputPin + OutputPin, D: DelayNs> {
     dht: Dht<P, D>,
@@ -146,8 +144,8 @@ impl<P: InputPin + OutputPin, D: DelayNs> Dht11<P, D> {
 
 /// Represents a reading from the sensor.
 pub struct SensorReading<T> {
-    pub humidity: T,
-    pub temperature: T,
+    humidity: T,
+    temperature: T,
 }
 
 impl<T: Display> Display for SensorReading<T> {
@@ -159,7 +157,6 @@ impl<T: Display> Display for SensorReading<T> {
         )
     }
 }
-
 
 // #[cfg(test)]
 // mod tests {
