@@ -148,6 +148,16 @@ pub struct SensorReading<T> {
     temperature: T,
 }
 
+impl<T: Clone + Copy> SensorReading<T> {
+    pub fn humidity(&self) -> T {
+        self.humidity
+    }
+
+    pub fn temperature(&self) -> T {
+        self.temperature
+    }
+}
+
 impl<T: Display> Display for SensorReading<T> {
     fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
         write!(

@@ -5,9 +5,17 @@ mod dht11;
 mod ens160_plus_aht21;
 mod mq135;
 
+use core::fmt::Write;
+use embedded_graphics::{
+    mono_font::{ascii::FONT_6X10, MonoTextStyleBuilder},
+    pixelcolor::BinaryColor,
+    prelude::Point,
+    text::{Baseline, Text},
+    Drawable,
+};
 use embedded_hal::delay::DelayNs;
 use embedded_hal_bus::{i2c::AtomicDevice, util::AtomicCell};
-use ens160::Ens160;
+use ens160::{AirQualityIndex, Ens160};
 use esp_hal::{
     analog::adc::{Adc, AdcConfig, Attenuation},
     clock::CpuClock,
@@ -22,6 +30,11 @@ use esp_hal::{
 use dht11::Dht11;
 use ens160_plus_aht21::Aht21;
 use mq135::MQ135;
+use ssd1306::{
+    prelude::{DisplayRotation, *},
+    size::DisplaySize128x64,
+    I2CDisplayInterface, Ssd1306,
+};
 
 // You need a panic handler. Usually, you you would use esp_backtrace, panic-probe, or
 // something similar, but you can also bring your own like this:
@@ -29,6 +42,43 @@ use mq135::MQ135;
 fn panic(info: &core::panic::PanicInfo) -> ! {
     log::info!("error {}", info);
     esp_hal::system::software_reset()
+}
+
+struct StrWriter<'a> {
+    buffer: &'a mut [u8],
+    pos: usize,
+}
+
+impl<'a> core::fmt::Write for StrWriter<'a> {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        let bytes = s.as_bytes();
+        let len = bytes.len();
+
+        if self.pos + len > self.buffer.len() {
+            return Err(core::fmt::Error);
+        }
+
+        self.buffer[self.pos..self.pos + len].copy_from_slice(bytes);
+        self.pos += len;
+        Ok(())
+    }
+}
+
+impl<'a> StrWriter<'a> {
+    fn as_str(&self) -> &str {
+        core::str::from_utf8(&self.buffer[..self.pos]).unwrap_or("")
+    }
+}
+
+struct PrintableResult<'a, T> {
+    value: T,
+    title: &'a str,
+}
+
+impl<'a, T: core::fmt::Display> core::fmt::Display for PrintableResult<'a, T> {
+    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
+        write!(f, "{}: {}", self.title, self.value)
+    }
 }
 
 #[main]
@@ -61,39 +111,180 @@ fn main() -> ! {
     ens160.operational().unwrap();
     delay.delay_ms(500);
 
+    let interface = I2CDisplayInterface::new(AtomicDevice::new(&i2c_cell));
+
+    let mut display = Ssd1306::new(interface, DisplaySize128x64, DisplayRotation::Rotate0)
+        .into_buffered_graphics_mode();
+    display.init().unwrap();
+
+    let text_style = MonoTextStyleBuilder::new()
+        .font(&FONT_6X10)
+        .text_color(BinaryColor::On)
+        .build();
+
     loop {
         let delay_start = Instant::now();
         while delay_start.elapsed() < Duration::from_millis(500) {}
 
-        if let Ok(value) = senseur.get_ppm() {
-            log::info!("CO2 Value: {}", value);
-        }
+        display.clear_buffer();
+        // Get CO2 values
 
+        // Get air quality from Ens160
         let quality = ens160.air_quality_index().unwrap();
-        let temp_hum = ens160.temp_and_hum().unwrap();
+
+        let quality_str = match quality {
+            AirQualityIndex::Excellent => "Air Quality: Excellent",
+            AirQualityIndex::Good => "Air Quality: Good",
+            AirQualityIndex::Moderate => "Air Quality: Moderate",
+            AirQualityIndex::Poor => "Air Quality: Poor",
+            AirQualityIndex::Unhealthy => "Air Quality: Unhealthy",
+        };
+        Text::with_baseline(quality_str, Point::new(0, 0), text_style, Baseline::Top)
+            .draw(&mut display)
+            .unwrap();
+
+        let co2_ppm = senseur.get_ppm().unwrap_or(400.0);
+        let result = PrintableResult {
+            value: co2_ppm,
+            title: "CO2 ppm",
+        };
+        let mut writer = StrWriter {
+            buffer: &mut [0u8; 32],
+            pos: 0,
+        };
+        let _ = write!(writer, "{}", result);
+        Text::with_baseline(
+            writer.as_str(),
+            Point::new(0, 12),
+            text_style,
+            Baseline::Top,
+        )
+        .draw(&mut display)
+        .unwrap();
+
+        // Get Eco2 from Ens160
         let eco2 = ens160.eco2().unwrap();
+        let result = PrintableResult {
+            value: *eco2,
+            title: "eCO2",
+        };
+
+        let mut writer = StrWriter {
+            buffer: &mut [0u8; 32],
+            pos: 0,
+        };
+        let _ = write!(writer, "{}", result);
+        Text::with_baseline(
+            writer.as_str(),
+            Point::new(0, 22),
+            text_style,
+            Baseline::Top,
+        )
+        .draw(&mut display)
+        .unwrap();
+
+        // Get TVOC from Ens160
         let tvoc = ens160.tvoc().unwrap();
+        let result = PrintableResult {
+            value: tvoc,
+            title: "TVOC ppb",
+        };
+        let mut writer = StrWriter {
+            buffer: &mut [0u8; 32],
+            pos: 0,
+        };
+        let _ = write!(writer, "{}", result);
+        Text::with_baseline(
+            writer.as_str(),
+            Point::new(0, 32),
+            text_style,
+            Baseline::Top,
+        )
+        .draw(&mut display)
+        .unwrap();
 
-        log::info!("quality: {:?}", quality);
-        log::info!("eco2: {:?}", eco2);
-        log::info!("tvoc: {:?}", tvoc);
-        log::info!("temp hum: {:?}", temp_hum); // TODO: is in integer needs to be in float
+        let mut total_temp: f32 = 0.0;
+        let mut total_hum: f32 = 0.0;
+        let mut count = 0.0;
 
-        match dht11.read() {
-            Ok(sensor_reading) => log::info!("DHT 11 Sensor - {}", sensor_reading),
-            Err(error) => log::error!("An error occurred while trying to read sensor: {:?}", error),
+        // Read ENS160
+        if let Ok((raw_temp, raw_hum)) = ens160.temp_and_hum() {
+            let temp = raw_temp as f32 / 100.0;
+            let hum = raw_hum as f32 / 100.0;
+            log::info!("ENS160: {}°C, {}%", temp, hum);
+            total_temp += temp;
+            total_hum += hum;
+            count += 1.0;
         }
 
-        match aht.read() {
-            Ok((h, t)) => log::info!(
-                "relative humidity={0}%; temperature={1}C",
-                h.rh(),
-                t.celsius()
-            ),
-
-            Err(error) => log::error!("An error occurred while trying to read sensor: {:?}", error),
+        // Read DHT11
+        if let Ok(reading) = dht11.read() {
+            total_temp += reading.temperature() as f32;
+            total_hum += reading.humidity() as f32;
+            log::info!(
+                "DHT11: {}°C, {}%",
+                reading.temperature() as f32,
+                reading.humidity() as f32
+            );
+            count += 1.0;
+        } else {
+            log::warn!("Failed to read from DHT11");
         }
 
-        log::info!("-----");
+        // Read AHT21
+        if let Ok((hum, temp)) = aht.read() {
+            total_temp += temp.celsius();
+            total_hum += hum.rh();
+            log::info!("AHT21: {}°C, {}%", temp.celsius(), hum.rh());
+            count += 1.0;
+        } else {
+            log::warn!("Failed to read from AHT21");
+        }
+
+        // Calculate averages if any valid reading was made
+        if count > 0.0 {
+            let avg_temp = total_temp / count;
+            let avg_hum = total_hum / count;
+
+            let result_avg_temp = PrintableResult {
+                value: avg_temp,
+                title: "Temperature",
+            };
+
+            let result_avg_hum = PrintableResult {
+                value: avg_hum,
+                title: "Humidity",
+            };
+
+            let mut writer = StrWriter {
+                buffer: &mut [0u8; 32],
+                pos: 0,
+            };
+            let _ = write!(writer, "{}", result_avg_temp);
+            Text::with_baseline(
+                writer.as_str(),
+                Point::new(0, 42),
+                text_style,
+                Baseline::Top,
+            )
+            .draw(&mut display)
+            .unwrap();
+
+            let mut writer = StrWriter {
+                buffer: &mut [0u8; 32],
+                pos: 0,
+            };
+            let _ = write!(writer, "{}", result_avg_hum);
+            Text::with_baseline(
+                writer.as_str(),
+                Point::new(0, 52),
+                text_style,
+                Baseline::Top,
+            )
+            .draw(&mut display)
+            .unwrap();
+        }
+
+        display.flush().unwrap();
     }
 }
