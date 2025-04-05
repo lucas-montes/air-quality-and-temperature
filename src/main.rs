@@ -4,6 +4,7 @@
 mod dht11;
 mod ens160_plus_aht21;
 mod mq135;
+mod utils;
 
 use core::fmt::Write;
 use embedded_graphics::{
@@ -24,7 +25,6 @@ use esp_hal::{
     i2c::master::{Config, I2c},
     main,
     peripherals::ADC1,
-    time::{Duration, Instant},
 };
 
 use dht11::Dht11;
@@ -35,6 +35,7 @@ use ssd1306::{
     size::DisplaySize128x64,
     I2CDisplayInterface, Ssd1306,
 };
+use utils::{RollingMedian, StrWriter};
 
 // You need a panic handler. Usually, you you would use esp_backtrace, panic-probe, or
 // something similar, but you can also bring your own like this:
@@ -42,43 +43,6 @@ use ssd1306::{
 fn panic(info: &core::panic::PanicInfo) -> ! {
     log::info!("error {}", info);
     esp_hal::system::software_reset()
-}
-
-struct StrWriter<'a> {
-    buffer: &'a mut [u8],
-    pos: usize,
-}
-
-impl<'a> core::fmt::Write for StrWriter<'a> {
-    fn write_str(&mut self, s: &str) -> core::fmt::Result {
-        let bytes = s.as_bytes();
-        let len = bytes.len();
-
-        if self.pos + len > self.buffer.len() {
-            return Err(core::fmt::Error);
-        }
-
-        self.buffer[self.pos..self.pos + len].copy_from_slice(bytes);
-        self.pos += len;
-        Ok(())
-    }
-}
-
-impl<'a> StrWriter<'a> {
-    fn as_str(&self) -> &str {
-        core::str::from_utf8(&self.buffer[..self.pos]).unwrap_or("")
-    }
-}
-
-struct PrintableResult<'a, T> {
-    value: T,
-    title: &'a str,
-}
-
-impl<'a, T: core::fmt::Display> core::fmt::Display for PrintableResult<'a, T> {
-    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
-        write!(f, "{}: {}", self.title, self.value)
-    }
 }
 
 #[main]
@@ -121,18 +85,19 @@ fn main() -> ! {
         .font(&FONT_6X10)
         .text_color(BinaryColor::On)
         .build();
+    let mut temperature_average = RollingMedian::<512, f32>::new("Temperature"); // around 2 Kib
+    let mut humidity_average = RollingMedian::<512, f32>::new("Humidity"); // around 2 Kib
+    let mut eco2_average = RollingMedian::<512, u16>::new("eCO2"); // around 2 Kib
+    let mut tvoc_average = RollingMedian::<512, u16>::new("TVOC ppb"); // around 2 Kib
+    let mut c02_average = RollingMedian::<512, f32>::new("CO2 ppm"); // around 2 Kib
 
     loop {
-        let delay_start = Instant::now();
-        while delay_start.elapsed() < Duration::from_millis(500) {}
+        delay.delay_ms(500);
 
         display.clear_buffer();
-        // Get CO2 values
 
         // Get air quality from Ens160
-        let quality = ens160.air_quality_index().unwrap();
-
-        let quality_str = match quality {
+        let quality_str = match ens160.air_quality_index().unwrap() {
             AirQualityIndex::Excellent => "Air Quality: Excellent",
             AirQualityIndex::Good => "Air Quality: Good",
             AirQualityIndex::Moderate => "Air Quality: Moderate",
@@ -143,16 +108,14 @@ fn main() -> ! {
             .draw(&mut display)
             .unwrap();
 
-        let co2_ppm = senseur.get_ppm().unwrap_or(400.0);
-        let result = PrintableResult {
-            value: co2_ppm,
-            title: "CO2 ppm",
+        if let Ok(co2_ppm) = senseur.get_ppm(){
+            c02_average.update(co2_ppm);
         };
         let mut writer = StrWriter {
             buffer: &mut [0u8; 32],
             pos: 0,
         };
-        let _ = write!(writer, "{}", result);
+        let _ = write!(writer, "{}", &c02_average);
         Text::with_baseline(
             writer.as_str(),
             Point::new(0, 12),
@@ -163,17 +126,15 @@ fn main() -> ! {
         .unwrap();
 
         // Get Eco2 from Ens160
-        let eco2 = ens160.eco2().unwrap();
-        let result = PrintableResult {
-            value: *eco2,
-            title: "eCO2",
-        };
+        if let Ok(eco2) = ens160.eco2() {
+            eco2_average.update(*eco2);
+        }
 
         let mut writer = StrWriter {
             buffer: &mut [0u8; 32],
             pos: 0,
         };
-        let _ = write!(writer, "{}", result);
+        let _ = write!(writer, "{}", &eco2_average);
         Text::with_baseline(
             writer.as_str(),
             Point::new(0, 22),
@@ -184,16 +145,14 @@ fn main() -> ! {
         .unwrap();
 
         // Get TVOC from Ens160
-        let tvoc = ens160.tvoc().unwrap();
-        let result = PrintableResult {
-            value: tvoc,
-            title: "TVOC ppb",
-        };
+        if let Ok(tvoc) = ens160.tvoc() {
+            tvoc_average.update(tvoc);
+        }
         let mut writer = StrWriter {
             buffer: &mut [0u8; 32],
             pos: 0,
         };
-        let _ = write!(writer, "{}", result);
+        let _ = write!(writer, "{}", &tvoc_average);
         Text::with_baseline(
             writer.as_str(),
             Point::new(0, 32),
@@ -203,87 +162,54 @@ fn main() -> ! {
         .draw(&mut display)
         .unwrap();
 
-        let mut total_temp: f32 = 0.0;
-        let mut total_hum: f32 = 0.0;
-        let mut count = 0.0;
 
         // Read ENS160
         if let Ok((raw_temp, raw_hum)) = ens160.temp_and_hum() {
             let temp = raw_temp as f32 / 100.0;
             let hum = raw_hum as f32 / 100.0;
-            log::info!("ENS160: {}°C, {}%", temp, hum);
-            total_temp += temp;
-            total_hum += hum;
-            count += 1.0;
+            temperature_average.update(temp);
+humidity_average.update(hum);
         }
 
         // Read DHT11
         if let Ok(reading) = dht11.read() {
-            total_temp += reading.temperature() as f32;
-            total_hum += reading.humidity() as f32;
-            log::info!(
-                "DHT11: {}°C, {}%",
-                reading.temperature() as f32,
-                reading.humidity() as f32
-            );
-            count += 1.0;
-        } else {
-            log::warn!("Failed to read from DHT11");
+            temperature_average.update(reading.temperature() as f32);
+humidity_average.update(reading.humidity() as f32);
         }
 
         // Read AHT21
         if let Ok((hum, temp)) = aht.read() {
-            total_temp += temp.celsius();
-            total_hum += hum.rh();
-            log::info!("AHT21: {}°C, {}%", temp.celsius(), hum.rh());
-            count += 1.0;
-        } else {
-            log::warn!("Failed to read from AHT21");
+            temperature_average.update(temp.celsius());
+humidity_average.update(hum.rh());
         }
 
-        // Calculate averages if any valid reading was made
-        if count > 0.0 {
-            let avg_temp = total_temp / count;
-            let avg_hum = total_hum / count;
+        let mut writer = StrWriter {
+            buffer: &mut [0u8; 32],
+            pos: 0,
+        };
+        let _ = write!(writer, "{}", &temperature_average);
+        Text::with_baseline(
+            writer.as_str(),
+            Point::new(0, 42),
+            text_style,
+            Baseline::Top,
+        )
+        .draw(&mut display)
+        .unwrap();
 
-            let result_avg_temp = PrintableResult {
-                value: avg_temp,
-                title: "Temperature",
-            };
-
-            let result_avg_hum = PrintableResult {
-                value: avg_hum,
-                title: "Humidity",
-            };
-
-            let mut writer = StrWriter {
-                buffer: &mut [0u8; 32],
-                pos: 0,
-            };
-            let _ = write!(writer, "{}", result_avg_temp);
-            Text::with_baseline(
-                writer.as_str(),
-                Point::new(0, 42),
-                text_style,
-                Baseline::Top,
-            )
-            .draw(&mut display)
-            .unwrap();
-
-            let mut writer = StrWriter {
-                buffer: &mut [0u8; 32],
-                pos: 0,
-            };
-            let _ = write!(writer, "{}", result_avg_hum);
-            Text::with_baseline(
-                writer.as_str(),
-                Point::new(0, 52),
-                text_style,
-                Baseline::Top,
-            )
-            .draw(&mut display)
-            .unwrap();
-        }
+        let mut writer = StrWriter {
+            buffer: &mut [0u8; 32],
+            pos: 0,
+        };
+        let _ = write!(writer, "{}", &humidity_average);
+        Text::with_baseline(
+            writer.as_str(),
+            Point::new(0, 52),
+            text_style,
+            Baseline::Top,
+        )
+        .draw(&mut display)
+        .unwrap();
 
         display.flush().unwrap();
     }
