@@ -22,7 +22,7 @@ use esp_hal::{
     clock::CpuClock,
     delay::Delay,
     gpio::{Flex, Pull},
-    i2c::master::{Config, I2c},
+    i2c::master::{BusTimeout, Config, I2c},
     main,
     peripherals::ADC1,
 };
@@ -41,7 +41,7 @@ use utils::{RollingMedian, StrWriter};
 // something similar, but you can also bring your own like this:
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
-    log::info!("error {}", info);
+    log::error!("error {}", info);
     esp_hal::system::software_reset()
 }
 
@@ -61,19 +61,49 @@ fn main() -> ! {
     let mut adc1 = Adc::new(peripherals.ADC1, adc_config);
     let mut senseur = MQ135::new(adc_pin, &mut adc1, delay);
 
-    let i2c = I2c::new(peripherals.I2C0, Config::default())
-        .expect("error with i2c")
-        .with_sda(peripherals.GPIO21)
-        .with_scl(peripherals.GPIO22);
-
+    let mut i2c = match I2c::new(
+        peripherals.I2C0,
+        Config::default().with_timeout(BusTimeout::Maximum),
+    ) {
+        Ok(i2c) => i2c
+            .with_sda(peripherals.GPIO21)
+            .with_scl(peripherals.GPIO22),
+        Err(e) => {
+            log::error!("I2C error: {:?}", e);
+            loop {}
+        }
+    };
     let i2c_cell = AtomicCell::new(i2c);
 
-    let mut aht = Aht21::new(AtomicDevice::new(&i2c_cell), delay).expect("aht error");
-
+    let mut aht = Aht21::new(AtomicDevice::new(&i2c_cell), delay);
     let mut ens160 = Ens160::new(AtomicDevice::new(&i2c_cell), 0x53);
-    delay.delay_ms(500);
-    ens160.operational().unwrap();
-    delay.delay_ms(500);
+
+    let mut ready = false;
+
+    let mut ready1 = false;
+    loop {
+        if ready && ready1 {
+            break;
+        }
+        delay.delay_ms(3000);
+        if !ready {
+            if let Err(err) = aht.init() {
+                log::error!("AHT error: {:?}", err);
+            } else {
+                ready = true;
+            }
+        }
+
+        if !ready1 {
+            delay.delay_ms(500);
+            if let Err(err) = ens160.operational() {
+                log::error!("ens160 error: {:?}", err);
+            } else {
+                ready1 = true;
+            }
+            delay.delay_ms(500);
+        }
+    }
 
     let interface = I2CDisplayInterface::new(AtomicDevice::new(&i2c_cell));
 
@@ -81,6 +111,7 @@ fn main() -> ! {
         .into_buffered_graphics_mode();
     display.init().unwrap();
 
+    log::info!("all started well");
     let text_style = MonoTextStyleBuilder::new()
         .font(&FONT_6X10)
         .text_color(BinaryColor::On)
@@ -108,7 +139,7 @@ fn main() -> ! {
             .draw(&mut display)
             .unwrap();
 
-        if let Ok(co2_ppm) = senseur.get_ppm(){
+        if let Ok(co2_ppm) = senseur.get_ppm() {
             c02_average.update(co2_ppm);
         };
         let mut writer = StrWriter {
@@ -162,25 +193,24 @@ fn main() -> ! {
         .draw(&mut display)
         .unwrap();
 
-
         // Read ENS160
         if let Ok((raw_temp, raw_hum)) = ens160.temp_and_hum() {
             let temp = raw_temp as f32 / 100.0;
             let hum = raw_hum as f32 / 100.0;
             temperature_average.update(temp);
-humidity_average.update(hum);
+            humidity_average.update(hum);
         }
 
         // Read DHT11
         if let Ok(reading) = dht11.read() {
             temperature_average.update(reading.temperature() as f32);
-humidity_average.update(reading.humidity() as f32);
+            humidity_average.update(reading.humidity() as f32);
         }
 
         // Read AHT21
         if let Ok((hum, temp)) = aht.read() {
             temperature_average.update(temp.celsius());
-humidity_average.update(hum.rh());
+            humidity_average.update(hum.rh());
         }
 
         let mut writer = StrWriter {

@@ -90,14 +90,16 @@ where
     D: DelayNs,
 {
     /// Creates a new AHT20 device from an I2C peripheral and a Delay.
-    pub fn new(i2c: I2C, delay: D) -> Result<Self, Error<I2C::Error>> {
-        let mut dev = Self { i2c, delay };
+    pub fn new(i2c: I2C, delay: D) -> Self {
+        Self { i2c, delay }
+    }
 
-        dev.reset()?;
+    pub fn init(&mut self) -> Result<(), Error<I2C::Error>> {
+        self.reset()?;
 
-        dev.calibrate()?;
+        self.calibrate()?;
 
-        Ok(dev)
+        Ok(())
     }
 
     /// Gets the sensor status.
