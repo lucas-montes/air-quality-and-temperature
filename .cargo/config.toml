@@ -1,5 +1,5 @@
 [unstable]
-build-std = ["core"]
+build-std = ["alloc", "core"]
 
 [build]
 target = "xtensa-esp32-none-elf"

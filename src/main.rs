@@ -6,7 +6,8 @@ mod ens160_plus_aht21;
 mod mq135;
 mod utils;
 
-use core::fmt::Write;
+use core::{fmt::Write, mem::MaybeUninit};
+use embassy_executor::Spawner;
 use embedded_graphics::{
     mono_font::{ascii::FONT_6X10, MonoTextStyleBuilder},
     pixelcolor::BinaryColor,
@@ -23,7 +24,6 @@ use esp_hal::{
     delay::Delay,
     gpio::{Flex, Pull},
     i2c::master::{BusTimeout, Config, I2c},
-    main,
     peripherals::ADC1,
 };
 
@@ -37,6 +37,8 @@ use ssd1306::{
 };
 use utils::{RollingMedian, StrWriter};
 
+extern crate alloc;
+
 // You need a panic handler. Usually, you you would use esp_backtrace, panic-probe, or
 // something similar, but you can also bring your own like this:
 #[panic_handler]
@@ -45,8 +47,18 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
     esp_hal::system::software_reset()
 }
 
-#[main]
-fn main() -> ! {
+#[esp_hal_embassy::main]
+async fn main(_spawner: Spawner) {
+    const HEAP_SIZE: usize = 32 * 1024;
+    static mut HEAP: MaybeUninit<[u8; HEAP_SIZE]> = MaybeUninit::uninit();
+
+    unsafe {
+        esp_alloc::HEAP.add_region(esp_alloc::HeapRegion::new(
+            HEAP.as_mut_ptr() as *mut u8,
+            HEAP_SIZE,
+            esp_alloc::MemoryCapability::Internal.into(),
+        ));
+    }
     esp_println::logger::init_logger_from_env();
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
@@ -61,7 +73,7 @@ fn main() -> ! {
     let mut adc1 = Adc::new(peripherals.ADC1, adc_config);
     let mut senseur = MQ135::new(adc_pin, &mut adc1, delay);
 
-    let mut i2c = match I2c::new(
+    let i2c = match I2c::new(
         peripherals.I2C0,
         Config::default().with_timeout(BusTimeout::Maximum),
     ) {
@@ -141,6 +153,7 @@ fn main() -> ! {
 
         if let Ok(co2_ppm) = senseur.get_ppm() {
             c02_average.update(co2_ppm);
+            log::info!("CO2 PPM: {}", co2_ppm);
         };
         let mut writer = StrWriter {
             buffer: &mut [0u8; 32],
@@ -159,6 +172,7 @@ fn main() -> ! {
         // Get Eco2 from Ens160
         if let Ok(eco2) = ens160.eco2() {
             eco2_average.update(*eco2);
+            log::info!("eCO2: {}", *eco2);
         }
 
         let mut writer = StrWriter {
@@ -178,6 +192,7 @@ fn main() -> ! {
         // Get TVOC from Ens160
         if let Ok(tvoc) = ens160.tvoc() {
             tvoc_average.update(tvoc);
+            log::info!("TVOC: {}", tvoc);
         }
         let mut writer = StrWriter {
             buffer: &mut [0u8; 32],
@@ -197,18 +212,25 @@ fn main() -> ! {
         if let Ok((raw_temp, raw_hum)) = ens160.temp_and_hum() {
             let temp = raw_temp as f32 / 100.0;
             let hum = raw_hum as f32 / 100.0;
+            log::info!("ENS160 temp: {} C, hum: {} %", temp, hum);
             temperature_average.update(temp);
             humidity_average.update(hum);
         }
 
         // Read DHT11
         if let Ok(reading) = dht11.read() {
+            log::info!(
+                "DHT11 temp: {} C, hum: {} %",
+                reading.temperature(),
+                reading.humidity()
+            );
             temperature_average.update(reading.temperature() as f32);
             humidity_average.update(reading.humidity() as f32);
         }
 
         // Read AHT21
         if let Ok((hum, temp)) = aht.read() {
+            log::info!("AHT21 temp: {} C, hum: {} %", temp.celsius(), hum.rh());
             temperature_average.update(temp.celsius());
             humidity_average.update(hum.rh());
         }
