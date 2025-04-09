@@ -1,12 +1,22 @@
 #![no_std]
 #![no_main]
+#![feature(alloc_error_handler)]
 
 mod dht11;
 mod ens160_plus_aht21;
 mod mq135;
 mod utils;
 
-use core::{fmt::Write, mem::MaybeUninit};
+use bleps::{
+    ad_structure::{
+        create_advertising_data, AdStructure, BR_EDR_NOT_SUPPORTED, LE_GENERAL_DISCOVERABLE,
+    },
+    async_attribute_server::AttributeServer,
+    asynch::Ble,
+    attribute_server::NotificationData,
+    gatt,
+};
+use core::{fmt::Write, ptr::addr_of_mut};
 use embassy_executor::Spawner;
 use embedded_graphics::{
     mono_font::{ascii::FONT_6X10, MonoTextStyleBuilder},
@@ -25,10 +35,18 @@ use esp_hal::{
     gpio::{Flex, Pull},
     i2c::master::{BusTimeout, Config, I2c},
     peripherals::ADC1,
+    rng::Rng,
+    system::{Cpu, CpuControl, Stack},
+    time,
+    timer::timg::TimerGroup,
 };
+use esp_hal_embassy::Executor;
+use esp_println::logger;
+use static_cell::StaticCell;
 
 use dht11::Dht11;
 use ens160_plus_aht21::Aht21;
+use esp_wifi::{ble::controller::BleConnector, init, EspWifiController};
 use mq135::MQ135;
 use ssd1306::{
     prelude::{DisplayRotation, *},
@@ -39,39 +57,47 @@ use utils::{RollingMedian, StrWriter};
 
 extern crate alloc;
 
+macro_rules! mk_static {
+    ($t:ty,$val:expr) => {{
+        static STATIC_CELL: static_cell::StaticCell<$t> = static_cell::StaticCell::new();
+        #[deny(unused_attributes)]
+        let x = STATIC_CELL.uninit().write(($val));
+        x
+    }};
+}
+
+static mut APP_CORE_STACK: Stack<8192> = Stack::new();
+
 // You need a panic handler. Usually, you you would use esp_backtrace, panic-probe, or
 // something similar, but you can also bring your own like this:
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
     log::error!("error {}", info);
-    esp_hal::system::software_reset()
+    loop {}
+}
+
+#[alloc_error_handler]
+fn alloc_error(layout: core::alloc::Layout) -> ! {
+    log::error!("Memory allocation error: {:?}", layout);
+    loop {}
 }
 
 #[esp_hal_embassy::main]
 async fn main(_spawner: Spawner) {
-    const HEAP_SIZE: usize = 32 * 1024;
-    static mut HEAP: MaybeUninit<[u8; HEAP_SIZE]> = MaybeUninit::uninit();
-
-    unsafe {
-        esp_alloc::HEAP.add_region(esp_alloc::HeapRegion::new(
-            HEAP.as_mut_ptr() as *mut u8,
-            HEAP_SIZE,
-            esp_alloc::MemoryCapability::Internal.into(),
-        ));
-    }
-    esp_println::logger::init_logger_from_env();
+    esp_alloc::heap_allocator!(size: 72 * 1024);
+    logger::init_logger_from_env();
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
 
-    let mut delay = Delay::new();
+    let delay = Delay::new();
     let mut capteur = Flex::new(peripherals.GPIO5);
     capteur.set_as_open_drain(Pull::None);
-    let mut dht11 = Dht11::new(capteur, delay);
+    let dht11 = Dht11::new(capteur, delay);
 
     let mut adc_config: AdcConfig<ADC1> = AdcConfig::new();
     let adc_pin = adc_config.enable_pin(peripherals.GPIO34, Attenuation::_11dB);
     let mut adc1 = Adc::new(peripherals.ADC1, adc_config);
-    let mut senseur = MQ135::new(adc_pin, &mut adc1, delay);
+    let senseur = MQ135::new(adc_pin, &mut adc1, delay);
 
     let i2c = match I2c::new(
         peripherals.I2C0,
@@ -87,9 +113,122 @@ async fn main(_spawner: Spawner) {
     };
     let i2c_cell = AtomicCell::new(i2c);
 
-    let mut aht = Aht21::new(AtomicDevice::new(&i2c_cell), delay);
-    let mut ens160 = Ens160::new(AtomicDevice::new(&i2c_cell), 0x53);
+    let aht = Aht21::new(AtomicDevice::new(&i2c_cell), delay);
+    let ens160 = Ens160::new(AtomicDevice::new(&i2c_cell), 0x53);
 
+    let interface = I2CDisplayInterface::new(AtomicDevice::new(&i2c_cell));
+
+    let mut display = Ssd1306::new(interface, DisplaySize128x64, DisplayRotation::Rotate0)
+        .into_buffered_graphics_mode();
+    display.init().unwrap();
+
+    log::info!("all started well");
+
+    let timg0 = TimerGroup::new(peripherals.TIMG0);
+
+    let esp_wifi_ctrl = &*mk_static!(
+        EspWifiController<'static>,
+        init(
+            timg0.timer0,
+            Rng::new(peripherals.RNG),
+            peripherals.RADIO_CLK,
+        )
+        .unwrap()
+    );
+
+    let timg1 = TimerGroup::new(peripherals.TIMG1);
+    esp_hal_embassy::init(timg1.timer0);
+    let bluetooth = peripherals.BT;
+    let mut cpu_control = CpuControl::new(peripherals.CPU_CTRL);
+
+    let _guard =
+        match cpu_control.start_app_core(unsafe { &mut *addr_of_mut!(APP_CORE_STACK) }, move || {
+            static EXECUTOR: StaticCell<Executor> = StaticCell::new();
+            let executor = EXECUTOR.init(Executor::new());
+            executor.run(|spawner| {
+                if let Err(err) = spawner.spawn(bluetooth_loop(esp_wifi_ctrl, bluetooth)) {
+                    log::error!("spawnner {}", err);
+                }
+            });
+        }) {
+            Ok(g) => g,
+            Err(err) => {
+                log::error!("Error starting app core: {:?}", err);
+                loop {}
+            }
+        };
+    data_loop(dht11, senseur, aht, ens160, delay, display).await
+}
+
+#[embassy_executor::task]
+async fn bluetooth_loop(
+    esp_wifi_ctrl: &'static EspWifiController<'static>,
+    mut bluetooth: esp_hal::peripherals::BT,
+) {
+    log::info!("bluetooth started {}", Cpu::current() as usize);
+    let connector = BleConnector::new(esp_wifi_ctrl, &mut bluetooth);
+
+    let now = || time::Instant::now().duration_since_epoch().as_millis();
+    let mut ble = Ble::new(connector, now);
+    log::info!("ble inint {:?}", ble.init().await);
+    log::info!("cmd {:?}", ble.cmd_set_le_advertising_parameters().await);
+    log::info!(
+        "{:?}",
+        ble.cmd_set_le_advertising_data(
+            create_advertising_data(&[
+                AdStructure::Flags(LE_GENERAL_DISCOVERABLE | BR_EDR_NOT_SUPPORTED),
+                AdStructure::CompleteLocalName("RoomTempIq"),
+                // AdStructure::ServiceUuids16(&[Uuid::Uuid16(0x1809)]),
+            ])
+            .unwrap()
+        )
+        .await
+    );
+    log::info!("{:?}", ble.cmd_set_le_advertise_enable(true).await);
+
+    log::info!("started advertising");
+
+    let sensor_data = b"Value: 80";
+
+    let mut read_func = |_offset: usize, data: &mut [u8]| {
+        data[0..sensor_data.len()].copy_from_slice(&sensor_data[..]);
+        sensor_data.len()
+    };
+
+    gatt!([service {
+        uuid: "a9c81b72-0f7a-4c59-b0a8-425e3bcf0a0e",
+        characteristics: [characteristic {
+            name: "my_characteristic",
+            uuid: "987312e0-2354-11eb-9f10-fbc30a62cf38",
+            notify: true,
+            read: read_func,
+        }],
+    },]);
+
+    let mut no_rng = bleps::no_rng::NoRng;
+    let mut srv = AttributeServer::new(&mut ble, &mut gatt_attributes, &mut no_rng);
+
+    let mut notifier =
+        || async { NotificationData::new(my_characteristic_handle, "Temp:24".as_bytes()) };
+
+    if let Err(err) = srv.run(&mut notifier).await {
+        log::error!("Error bluetooth: {:?}", err);
+    };
+}
+
+async fn data_loop<'a>(
+    mut dht11: Dht11<Flex<'a>, Delay>,
+    mut senseur: MQ135<'a, Delay>,
+    mut aht: Aht21<AtomicDevice<'a, I2c<'a, esp_hal::Blocking>>, Delay>,
+    mut ens160: Ens160<AtomicDevice<'a, I2c<'a, esp_hal::Blocking>>>,
+    mut delay: Delay,
+    mut display: Ssd1306<
+        I2CInterface<AtomicDevice<'a, I2c<'a, esp_hal::Blocking>>>,
+        DisplaySize128x64,
+        ssd1306::mode::BufferedGraphicsMode<DisplaySize128x64>,
+    >,
+) {
+    log::info!("data started {}", Cpu::current() as usize);
     let mut ready = false;
 
     let mut ready1 = false;
@@ -117,28 +256,25 @@ async fn main(_spawner: Spawner) {
         }
     }
 
-    let interface = I2CDisplayInterface::new(AtomicDevice::new(&i2c_cell));
-
-    let mut display = Ssd1306::new(interface, DisplaySize128x64, DisplayRotation::Rotate0)
-        .into_buffered_graphics_mode();
-    display.init().unwrap();
-
-    log::info!("all started well");
     let text_style = MonoTextStyleBuilder::new()
         .font(&FONT_6X10)
         .text_color(BinaryColor::On)
         .build();
-    let mut temperature_average = RollingMedian::<512, f32>::new("Temperature"); // around 2 Kib
-    let mut humidity_average = RollingMedian::<512, f32>::new("Humidity"); // around 2 Kib
-    let mut eco2_average = RollingMedian::<512, u16>::new("eCO2"); // around 2 Kib
-    let mut tvoc_average = RollingMedian::<512, u16>::new("TVOC ppb"); // around 2 Kib
-    let mut c02_average = RollingMedian::<512, f32>::new("CO2 ppm"); // around 2 Kib
-
+    let mut temperature_average = RollingMedian::<256, f32>::new("Temperature");
+    let mut humidity_average = RollingMedian::<256, f32>::new("Humidity");
+    let mut eco2_average = RollingMedian::<256, u16>::new("eCO2");
+    let mut tvoc_average = RollingMedian::<256, u16>::new("TVOC ppb");
+    let mut c02_average = RollingMedian::<256, f32>::new("CO2 ppm");
+    let mut show_heap = 0;
     loop {
+        show_heap += 1;
         delay.delay_ms(500);
 
         display.clear_buffer();
 
+        if show_heap % 3 == 0 {
+            log::info!("{}", esp_alloc::HEAP.stats());
+        };
         // Get air quality from Ens160
         let quality_str = match ens160.air_quality_index().unwrap() {
             AirQualityIndex::Excellent => "Air Quality: Excellent",
