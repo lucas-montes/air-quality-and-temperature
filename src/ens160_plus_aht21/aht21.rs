@@ -9,7 +9,6 @@
 //! https://github.com/fmckeogh/aht20/blob/master/src/lib.rs
 
 #![deny(missing_docs)]
-#![no_std]
 
 use {
     bitflags::bitflags,
