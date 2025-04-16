@@ -1,6 +1,6 @@
+
 #![no_std]
 #![no_main]
-#![feature(alloc_error_handler)]
 
 mod dht11;
 mod ens160_plus_aht21;
@@ -11,14 +11,18 @@ use core::{fmt::Write, ptr::addr_of_mut};
 
 use bleps::{
     ad_structure::{
-        create_advertising_data, AdStructure, BR_EDR_NOT_SUPPORTED, LE_GENERAL_DISCOVERABLE,
+        create_advertising_data,
+        AdStructure,
+        BR_EDR_NOT_SUPPORTED,
+        LE_GENERAL_DISCOVERABLE,
     },
-    async_attribute_server::AttributeServer,
-    asynch::Ble,
-    attribute_server::NotificationData,
+    attribute_server::{AttributeServer, NotificationData, WorkResult},
     gatt,
+    Ble,
+    HciConnector,
 };
-
+use esp_alloc as _;
+use esp_backtrace as _;
 use embassy_executor::Spawner;
 use embassy_sync::{
     blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel, signal::Signal,
@@ -39,7 +43,7 @@ use esp_hal::{
     delay::Delay,
     gpio::{Flex, Output, Pull},
     i2c::master::{BusTimeout, Config, I2c},
-    peripherals::ADC1,
+    peripherals::{ADC1, ADC2},
     rng::Rng,
     system::{Cpu, CpuControl, Stack},
     time,
@@ -60,43 +64,6 @@ use ssd1306::{
 };
 use utils::{RollingMedian, StrWriter};
 
-// When you are okay with using a nightly compiler it's better to use https://docs.rs/static_cell/2.1.0/static_cell/macro.make_static.html
-macro_rules! mk_static {
-    ($t:ty,$val:expr) => {{
-        static STATIC_CELL: static_cell::StaticCell<$t> = static_cell::StaticCell::new();
-        #[deny(unused_attributes)]
-        let x = STATIC_CELL.uninit().write(($val));
-        x
-    }};
-}
-
-#[panic_handler]
-fn panic(info: &core::panic::PanicInfo) -> ! {
-    log::error!("big error happened {}", info);
-    esp_hal::system::software_reset();
-}
-
-static mut APP_CORE_STACK: Stack<8192> = Stack::new();
-
-/// Waits for a message that contains a duration, then flashes a led for that
-/// duration of time.
-#[embassy_executor::task]
-async fn control_led(
-    mut led: Output<'static>,
-    control: &'static Signal<CriticalSectionRawMutex, bool>,
-) {
-    log::info!("Starting control_led() on core {}", Cpu::current() as usize);
-    loop {
-        if control.wait().await {
-            log::info!("LED on");
-            led.set_low();
-        } else {
-            log::info!("LED off");
-            led.set_high();
-        }
-    }
-}
-
 struct SensorsData {
     temperature: f32,
     humidity: f32,
@@ -114,75 +81,67 @@ impl SensorsData {
         bytes
     }
 }
+static mut APP_CORE_STACK: Stack<8192> = Stack::new();
 
-//static SHARED: Channel<CriticalSectionRawMutex, SensorsData, 30> = Channel::new();
-
-#[esp_hal_embassy::main]
-async fn main(_spawner: Spawner)  {
+#[esp_hal::main]
+fn main() -> ! {
     esp_println::logger::init_logger_from_env();
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
 
+    // esp_alloc::heap_allocator!(size: 72 * 1024);
     esp_alloc::heap_allocator!(#[link_section = ".dram2_uninit"] size: 72 * 1024);
 
-    let timg = TimerGroup::new(peripherals.TIMG0);
-    let rando = Rng::new(peripherals.RNG);
-    let esp_wifi_ctrl = &*mk_static!(
-        EspWifiController<'static>,
-        init(timg.timer0, rando, peripherals.RADIO_CLK,).unwrap()
-    );
 
-    let timg0 = TimerGroup::new(peripherals.TIMG1);
-    let timer0: AnyTimer = timg0.timer0.into();
-    let timer1: AnyTimer = timg0.timer1.into();
-      esp_hal_embassy::init([timer0, timer1]);
+    let timg0 = TimerGroup::new(peripherals.TIMG0);
 
+    let esp_wifi_ctrl = init(
+        timg0.timer0,
+        Rng::new(peripherals.RNG),
+        peripherals.RADIO_CLK,
+    )
+    .unwrap();
 
-    // let channel = Channel::<CriticalSectionRawMutex, SensorsData, 30>::new();
-
-    // let tx = channel.sender();
-    // let rx = channel.receiver();
+    esp_hal_embassy::init(timg0.timer1);
 
     let mut cpu_control = CpuControl::new(peripherals.CPU_CTRL);
-       let _guard =
-           match cpu_control.start_app_core(unsafe { &mut *addr_of_mut!(APP_CORE_STACK) }, move || {
-               static EXECUTOR: StaticCell<Executor> = StaticCell::new();
-               let executor = EXECUTOR.init(Executor::new());
-               executor.run(|spawner| {
-                   if let Err(err) = spawner.spawn(data_loop(
-                       peripherals.GPIO5,
-                       peripherals.GPIO21,
-                       peripherals.GPIO22,
-                       peripherals.GPIO34,
-                       peripherals.ADC1,
-                       peripherals.I2C0,
-                       //tx
-                   )) {
-                       log::error!("spawnner {}", err);
-                   }
-               });
-           }) {
-               Ok(g) => g,
-               Err(err) => {
-                   log::error!("Error starting app core: {:?}", err);
-                   loop {}
-               }
-           };
+    let _guard =
+        match cpu_control.start_app_core(unsafe { &mut *addr_of_mut!(APP_CORE_STACK) }, move || {
+            static EXECUTOR: StaticCell<Executor> = StaticCell::new();
+            let executor = EXECUTOR.init(Executor::new());
+            executor.run(|spawner| {
+                if let Err(err) = spawner.spawn(data_loop(
+                    peripherals.GPIO5,
+                    peripherals.GPIO21,
+                    peripherals.GPIO22,
+                    peripherals.GPIO34,
+                    peripherals.ADC1,
+                    peripherals.I2C0,
+                    //tx
+                )) {
+                    log::error!("spawnner {}", err);
+                }
+            });
+        }) {
+            Ok(g) => g,
+            Err(err) => {
+                log::error!("Error starting app core: {:?}", err);
+                loop {}
+            }
+        };
 
-    bluetooth_loop(esp_wifi_ctrl, peripherals.BT).await
-}
 
-async fn bluetooth_loop(
-    esp_wifi_ctrl: &'static EspWifiController<'static>,
-    mut bluetooth: esp_hal::peripherals::BT,
-) {
-    log::info!("bluetooth started {}", Cpu::current() as usize);
-    let connector = BleConnector::new(esp_wifi_ctrl, &mut bluetooth);
+    let mut debounce_cnt = 500;
+
+    let mut bluetooth = peripherals.BT;
 
     let now = || time::Instant::now().duration_since_epoch().as_millis();
-    let mut ble = Ble::new(connector, now);
     loop {
-        match ble.init().await {
+        let connector = BleConnector::new(&esp_wifi_ctrl, &mut bluetooth);
+        let hci = HciConnector::new(connector, now);
+        let mut ble = Ble::new(&hci);
+
+        match ble.init() {
             Ok(e) => {
                 log::info!("Bluetooth initialized {:?}", e);
             }
@@ -191,7 +150,7 @@ async fn bluetooth_loop(
                 loop {}
             }
         }
-        match ble.cmd_set_le_advertising_parameters().await {
+        match ble.cmd_set_le_advertising_parameters() {
             Ok(e) => {
                 log::info!("cmd_set_le_advertising_parameters {:?}", e);
             }
@@ -213,7 +172,7 @@ async fn bluetooth_loop(
             }
         };
 
-        match ble.cmd_set_le_advertising_data(data).await {
+        match ble.cmd_set_le_advertising_data(data) {
             Ok(e) => {
                 log::info!("cmd_set_le_advertising_data {:?}", e);
             }
@@ -223,7 +182,7 @@ async fn bluetooth_loop(
             }
         }
 
-        match ble.cmd_set_le_advertise_enable(true).await {
+        match ble.cmd_set_le_advertise_enable(true) {
             Ok(e) => {
                 log::info!("cmd_set_le_advertise_enable {:?}", e);
             }
@@ -235,21 +194,38 @@ async fn bluetooth_loop(
 
         log::info!("started advertising");
 
+        let mut rf = |_offset: usize, data: &mut [u8]| {
+            data[..20].copy_from_slice(&b"Hello Bare-Metal BLE"[..]);
+            17
+        };
+        let mut wf = |offset: usize, data: &[u8]| {
+            log::info!("RECEIVED: {} {:?}", offset, data);
+        };
+
+        let mut wf2 = |offset: usize, data: &[u8]| {
+            log::info!("RECEIVED: {} {:?}", offset, data);
+        };
+
         let mut rf3 = |_offset: usize, data: &mut [u8]| {
             data[..5].copy_from_slice(&b"Hola!"[..]);
-            log::info!("Sending LED on");
             5
         };
         let mut wf3 = |offset: usize, data: &[u8]| {
-            log::info!("Sending LED off");
-        };
-        let mut wf2 = |offset: usize, data: &[u8]| {
-            log::info!("RECEIVED: {} {:?}", offset, data);
+            log::info!("RECEIVED: Offset {}, data {:?}", offset, data);
         };
 
         gatt!([service {
             uuid: "937312e0-2354-11eb-9f10-fbc30a62cf38",
             characteristics: [
+                characteristic {
+                    uuid: "937312e0-2354-11eb-9f10-fbc30a62cf38",
+                    read: rf,
+                    write: wf,
+                },
+                characteristic {
+                    uuid: "957312e0-2354-11eb-9f10-fbc30a62cf38",
+                    write: wf2,
+                },
                 characteristic {
                     name: "my_characteristic",
                     uuid: "987312e0-2354-11eb-9f10-fbc30a62cf38",
@@ -257,44 +233,49 @@ async fn bluetooth_loop(
                     read: rf3,
                     write: wf3,
                 },
-                characteristic {
-                    uuid: "957312e0-2354-11eb-9f10-fbc30a62cf38",
-                    write: wf2,
-                },
             ],
         },]);
 
         let mut rng = bleps::no_rng::NoRng;
         let mut srv = AttributeServer::new(&mut ble, &mut gatt_attributes, &mut rng);
 
-        let mut notifier = || {
-            async {
-                // let data = SHARED.receive().await;
-                let data = SensorsData {
-                    temperature: 33.3,
-                    humidity: 33.3,
-                    eco2: 33,
-                    tvoc: 33,
-                };
-                NotificationData::new(my_characteristic_handle, &data.to_bytes())
+        loop {
+            let mut notification = None;
+
+            if debounce_cnt > 0 {
+                debounce_cnt -= 1;
+                if debounce_cnt == 0 {
+                    let mut cccd = [0u8; 1];
+                    if let Some(1) = srv.get_characteristic_value(
+                        my_characteristic_notify_enable_handle,
+                        0,
+                        &mut cccd,
+                    ) {
+                        // if notifications enabled
+                        if cccd[0] == 1 {
+                            notification = Some(NotificationData::new(
+                                my_characteristic_handle,
+                                &b"Notification"[..],
+                            ));
+                        }
+                    }
+                }
+            };
+
+            match srv.do_work_with_notification(notification) {
+                Ok(res) => {
+                    if let WorkResult::GotDisconnected = res {
+                        break;
+                    }
+                }
+                Err(err) => {
+                    log::error!("{:?}", err);
+                }
             }
-        };
-
-        log::info!("starting srving");
-        match embassy_time::with_timeout(
-            embassy_time::Duration::from_secs(1),
-            srv.run(&mut notifier),
-        )
-        .await
-        {
-            Ok(Ok(())) => log::info!("srv.run is ok"),
-            Ok(Err(err)) => log::error!("error in srv.run {:?}", err),
-            Err(_) => log::debug!("srv.run timed out, retrying"),
-        };
-
-        log::info!("srv worked");
+        }
     }
 }
+
 
 #[embassy_executor::task]
 async fn data_loop(
