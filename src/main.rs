@@ -1,9 +1,8 @@
-
 #![no_std]
 #![no_main]
 
 mod dht11;
-mod ens160_plus_aht21;
+mod aht21;
 mod mq135;
 mod utils;
 
@@ -11,21 +10,14 @@ use core::{fmt::Write, ptr::addr_of_mut};
 
 use bleps::{
     ad_structure::{
-        create_advertising_data,
-        AdStructure,
-        BR_EDR_NOT_SUPPORTED,
-        LE_GENERAL_DISCOVERABLE,
+        create_advertising_data, AdStructure, BR_EDR_NOT_SUPPORTED, LE_GENERAL_DISCOVERABLE,
     },
     attribute_server::{AttributeServer, NotificationData, WorkResult},
-    gatt,
-    Ble,
-    HciConnector,
+    gatt, Ble, HciConnector,
 };
-use esp_alloc as _;
-use esp_backtrace as _;
-use embassy_executor::Spawner;
+
 use embassy_sync::{
-    blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel, signal::Signal,
+    blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel,
 };
 use embassy_time::Timer;
 use embedded_graphics::{
@@ -37,25 +29,27 @@ use embedded_graphics::{
 };
 use embedded_hal_bus::{i2c::AtomicDevice, util::AtomicCell};
 use ens160::{AirQualityIndex, Ens160};
+use esp_alloc as _;
+use esp_backtrace as _;
 use esp_hal::{
     analog::adc::{Adc, AdcConfig, Attenuation},
     clock::CpuClock,
     delay::Delay,
-    gpio::{Flex, Output, Pull},
+    gpio::{Flex,  Pull},
     i2c::master::{BusTimeout, Config, I2c},
-    peripherals::{ADC1, ADC2},
+    peripherals::{ADC1},
     rng::Rng,
     system::{Cpu, CpuControl, Stack},
     time,
-    timer::{timg::TimerGroup, AnyTimer},
+    timer::{timg::TimerGroup,},
 };
 use esp_hal_embassy::Executor;
 
 use static_cell::StaticCell;
 
 use dht11::Dht11;
-use ens160_plus_aht21::Aht21;
-use esp_wifi::{ble::controller::BleConnector, init, EspWifiController};
+use aht21::Aht21;
+use esp_wifi::{ble::controller::BleConnector, init};
 use mq135::MQ135;
 use ssd1306::{
     prelude::{DisplayRotation, *},
@@ -64,6 +58,7 @@ use ssd1306::{
 };
 use utils::{RollingMedian, StrWriter};
 
+#[derive(Debug)]
 struct SensorsData {
     temperature: f32,
     humidity: f32,
@@ -82,6 +77,7 @@ impl SensorsData {
     }
 }
 static mut APP_CORE_STACK: Stack<8192> = Stack::new();
+static SENSOR_CHANNEL: Channel<CriticalSectionRawMutex, SensorsData, 5> = Channel::new();
 
 #[esp_hal::main]
 fn main() -> ! {
@@ -89,9 +85,7 @@ fn main() -> ! {
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
 
-    // esp_alloc::heap_allocator!(size: 72 * 1024);
     esp_alloc::heap_allocator!(#[link_section = ".dram2_uninit"] size: 72 * 1024);
-
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
 
@@ -117,7 +111,6 @@ fn main() -> ! {
                     peripherals.GPIO34,
                     peripherals.ADC1,
                     peripherals.I2C0,
-                    //tx
                 )) {
                     log::error!("spawnner {}", err);
                 }
@@ -130,8 +123,6 @@ fn main() -> ! {
             }
         };
 
-
-    let mut debounce_cnt = 500;
 
     let mut bluetooth = peripherals.BT;
 
@@ -194,18 +185,6 @@ fn main() -> ! {
 
         log::info!("started advertising");
 
-        let mut rf = |_offset: usize, data: &mut [u8]| {
-            data[..20].copy_from_slice(&b"Hello Bare-Metal BLE"[..]);
-            17
-        };
-        let mut wf = |offset: usize, data: &[u8]| {
-            log::info!("RECEIVED: {} {:?}", offset, data);
-        };
-
-        let mut wf2 = |offset: usize, data: &[u8]| {
-            log::info!("RECEIVED: {} {:?}", offset, data);
-        };
-
         let mut rf3 = |_offset: usize, data: &mut [u8]| {
             data[..5].copy_from_slice(&b"Hola!"[..]);
             5
@@ -216,24 +195,13 @@ fn main() -> ! {
 
         gatt!([service {
             uuid: "937312e0-2354-11eb-9f10-fbc30a62cf38",
-            characteristics: [
-                characteristic {
-                    uuid: "937312e0-2354-11eb-9f10-fbc30a62cf38",
-                    read: rf,
-                    write: wf,
-                },
-                characteristic {
-                    uuid: "957312e0-2354-11eb-9f10-fbc30a62cf38",
-                    write: wf2,
-                },
-                characteristic {
-                    name: "my_characteristic",
-                    uuid: "987312e0-2354-11eb-9f10-fbc30a62cf38",
-                    notify: true,
-                    read: rf3,
-                    write: wf3,
-                },
-            ],
+            characteristics: [characteristic {
+                name: "my_characteristic",
+                uuid: "987312e0-2354-11eb-9f10-fbc30a62cf38",
+                notify: true,
+                read: rf3,
+                write: wf3,
+            },],
         },]);
 
         let mut rng = bleps::no_rng::NoRng;
@@ -242,25 +210,10 @@ fn main() -> ! {
         loop {
             let mut notification = None;
 
-            if debounce_cnt > 0 {
-                debounce_cnt -= 1;
-                if debounce_cnt == 0 {
-                    let mut cccd = [0u8; 1];
-                    if let Some(1) = srv.get_characteristic_value(
-                        my_characteristic_notify_enable_handle,
-                        0,
-                        &mut cccd,
-                    ) {
-                        // if notifications enabled
-                        if cccd[0] == 1 {
-                            notification = Some(NotificationData::new(
-                                my_characteristic_handle,
-                                &b"Notification"[..],
-                            ));
-                        }
-                    }
-                }
-            };
+            if let Ok(data) = SENSOR_CHANNEL.try_receive() {
+                let bytes = data.to_bytes();
+                notification = Some(NotificationData::new(my_characteristic_handle, &bytes));
+            }
 
             match srv.do_work_with_notification(notification) {
                 Ok(res) => {
@@ -276,7 +229,6 @@ fn main() -> ! {
     }
 }
 
-
 #[embassy_executor::task]
 async fn data_loop(
     dht11_pin: esp_hal::gpio::GpioPin<5>,
@@ -285,7 +237,6 @@ async fn data_loop(
     adc_pin: esp_hal::gpio::GpioPin<34>,
     adc1: ADC1,
     i2c0: esp_hal::peripherals::I2C0,
-    // tx: embassy_sync::channel::Sender<'static, CriticalSectionRawMutex, SensorsData, 30>
 ) {
     log::info!("data started {}", Cpu::current() as usize);
     let delay = Delay::new();
@@ -497,10 +448,6 @@ async fn data_loop(
             eco2: eco2_average.median(),
             tvoc: tvoc_average.median(),
         };
-
-        //         SHARED.send(
-        // data
-
-        //         ).await;
+        SENSOR_CHANNEL.send(data).await;
     }
 }

@@ -62,7 +62,7 @@ impl<'a,const N: usize, T: Copy + PartialOrd + Default> RollingMedian<'a, N, T> 
             }
         }
 
-        sorted[count / 2] // middle element
+        sorted[count / 2]
     }
 }
 
