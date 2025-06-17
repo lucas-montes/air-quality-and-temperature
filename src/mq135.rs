@@ -42,6 +42,26 @@ pub enum SensorError {
     PinError
 }
 
+// pub struct SoilMoisture<'a, ADCI: RegisterAccess + 'a, PIN: AdcChannel + AnalogPin, D: DelayNs> {
+//     pin: AdcPin<PIN, ADCI>,
+//     adc: Adc<'a, ADCI, esp_hal::Blocking>,
+//     delay: D,
+// }
+
+// impl<'a, ADCI: RegisterAccess + 'a,PIN: AdcChannel + AnalogPin,D: DelayNs> SoilMoisture<'a,ADCI,PIN, D> {
+//     /// Create a new MQ135 instance
+//     pub fn new(adc_instance: impl Peripheral<P = ADCI> + 'a,pin: PIN, attenuation: Attenuation,delay: D) -> Self {
+//         let mut adc_config: AdcConfig<ADCI> = AdcConfig::new();
+//     let adc_pin = adc_config.enable_pin(pin, attenuation);
+//     let adc = Adc::new(adc_instance, adc_config);
+
+//         Self {
+//             pin: adc_pin,
+//             adc,
+//             delay,
+//         }
+//     }
+
 pub struct MQ135<'a, D: DelayNs> {
     pin: AdcPin<GpioPin<34>, ADC1>, // GPIO35 for AO
     adc: &'a mut Adc<'a, ADC1, esp_hal::Blocking>,

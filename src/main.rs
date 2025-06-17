@@ -1,8 +1,8 @@
 #![no_std]
 #![no_main]
 
-mod dht11;
 mod aht21;
+mod dht11;
 mod mq135;
 mod utils;
 
@@ -16,9 +16,7 @@ use bleps::{
     gatt, Ble, HciConnector,
 };
 
-use embassy_sync::{
-    blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel,
-};
+use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel};
 use embassy_time::Timer;
 use embedded_graphics::{
     mono_font::{ascii::FONT_6X10, MonoTextStyleBuilder},
@@ -35,20 +33,20 @@ use esp_hal::{
     analog::adc::{Adc, AdcConfig, Attenuation},
     clock::CpuClock,
     delay::Delay,
-    gpio::{Flex,  Pull},
+    gpio::{Flex, Pull},
     i2c::master::{BusTimeout, Config, I2c},
-    peripherals::{ADC1},
+    peripherals::ADC1,
     rng::Rng,
     system::{Cpu, CpuControl, Stack},
     time,
-    timer::{timg::TimerGroup,},
+    timer::timg::TimerGroup,
 };
 use esp_hal_embassy::Executor;
 
 use static_cell::StaticCell;
 
-use dht11::Dht11;
 use aht21::Aht21;
+use dht11::Dht11;
 use esp_wifi::{ble::controller::BleConnector, init};
 use mq135::MQ135;
 use ssd1306::{
@@ -59,21 +57,25 @@ use ssd1306::{
 use utils::{RollingMedian, StrWriter};
 
 #[derive(Debug)]
+#[repr(C)]
 struct SensorsData {
     temperature: f32,
     humidity: f32,
+    co2: f32,
     eco2: u16,
     tvoc: u16,
 }
 
 impl SensorsData {
-    fn to_bytes(&self) -> [u8; 12] {
-        let mut bytes = [0u8; 12];
-        bytes[0..4].copy_from_slice(&self.temperature.to_le_bytes());
-        bytes[4..8].copy_from_slice(&self.humidity.to_le_bytes());
-        bytes[8..10].copy_from_slice(&self.eco2.to_le_bytes());
-        bytes[10..12].copy_from_slice(&self.tvoc.to_le_bytes());
-        bytes
+    fn into_bytes(self) -> [u8; 16] {
+        unsafe { core::mem::transmute::<Self, [u8; 16]>(self) }
+        // let mut bytes = [0u8; 16];
+        // bytes[0..4].swap_with_slice(&mut self.temperature.to_le_bytes());
+        // bytes[4..8].swap_with_slice(&mut self.humidity.to_le_bytes());
+        // bytes[8..12].swap_with_slice(&mut self.co2.to_le_bytes());
+        // bytes[12..14].swap_with_slice(&mut self.eco2.to_le_bytes());
+        // bytes[14..16].swap_with_slice(&mut self.tvoc.to_le_bytes());
+        // bytes
     }
 }
 static mut APP_CORE_STACK: Stack<8192> = Stack::new();
@@ -122,7 +124,6 @@ fn main() -> ! {
                 loop {}
             }
         };
-
 
     let mut bluetooth = peripherals.BT;
 
@@ -208,12 +209,13 @@ fn main() -> ! {
         let mut srv = AttributeServer::new(&mut ble, &mut gatt_attributes, &mut rng);
 
         loop {
-            let mut notification = None;
-
-            if let Ok(data) = SENSOR_CHANNEL.try_receive() {
-                let bytes = data.to_bytes();
-                notification = Some(NotificationData::new(my_characteristic_handle, &bytes));
-            }
+            let notification = match SENSOR_CHANNEL.try_receive() {
+                Ok(data) => {
+                    let bytes = data.into_bytes();
+                    Some(NotificationData::new(my_characteristic_handle, &bytes))
+                }
+                Err(_err) => None,
+            };
 
             match srv.do_work_with_notification(notification) {
                 Ok(res) => {
@@ -265,7 +267,6 @@ async fn data_loop(
 
     let mut display = Ssd1306::new(interface, DisplaySize128x64, DisplayRotation::Rotate0)
         .into_buffered_graphics_mode();
-    display.init().unwrap();
 
     log::info!("all started well");
 
@@ -297,6 +298,7 @@ async fn data_loop(
         }
     }
 
+    display.init().unwrap();
     let text_style = MonoTextStyleBuilder::new()
         .font(&FONT_6X10)
         .text_color(BinaryColor::On)
@@ -323,12 +325,12 @@ async fn data_loop(
         Text::with_baseline(quality_str, Point::new(0, 0), text_style, Baseline::Top)
             .draw(&mut display)
             .unwrap();
-        Timer::after_nanos(1).await;
+
         if let Ok(co2_ppm) = senseur.get_ppm() {
             c02_average.update(co2_ppm);
             //log::info!("CO2 PPM: {}", co2_ppm);
         };
-        Timer::after_nanos(1).await;
+
         let mut writer = StrWriter {
             buffer: &mut [0u8; 32],
             pos: 0,
@@ -342,7 +344,7 @@ async fn data_loop(
         )
         .draw(&mut display)
         .unwrap();
-        Timer::after_nanos(1).await;
+
         // Get Eco2 from Ens160
         if let Ok(eco2) = ens160.eco2() {
             eco2_average.update(*eco2);
@@ -363,7 +365,7 @@ async fn data_loop(
         )
         .draw(&mut display)
         .unwrap();
-        Timer::after_nanos(1).await;
+
         // Get TVOC from Ens160
         if let Ok(tvoc) = ens160.tvoc() {
             tvoc_average.update(tvoc);
@@ -383,7 +385,7 @@ async fn data_loop(
         )
         .draw(&mut display)
         .unwrap();
-        Timer::after_nanos(1).await;
+
         // Read ENS160
         if let Ok((raw_temp, raw_hum)) = ens160.temp_and_hum() {
             let temp = raw_temp as f32 / 100.0;
@@ -392,7 +394,7 @@ async fn data_loop(
             temperature_average.update(temp);
             humidity_average.update(hum);
         }
-        Timer::after_nanos(1).await;
+
         // Read DHT11
         if let Ok(reading) = dht11.read() {
             // log::info!(
@@ -403,14 +405,13 @@ async fn data_loop(
             temperature_average.update(reading.temperature() as f32);
             humidity_average.update(reading.humidity() as f32);
         }
-        Timer::after_nanos(1).await;
+
         // Read AHT21
         if let Ok((hum, temp)) = aht.read() {
             // log::info!("AHT21 temp: {} C, hum: {} %", temp.celsius(), hum.rh());
             temperature_average.update(temp.celsius());
             humidity_average.update(hum.rh());
         }
-        Timer::after_nanos(1).await;
 
         let mut writer = StrWriter {
             buffer: &mut [0u8; 32],
@@ -425,7 +426,6 @@ async fn data_loop(
         )
         .draw(&mut display)
         .unwrap();
-        Timer::after_nanos(1).await;
         let mut writer = StrWriter {
             buffer: &mut [0u8; 32],
             pos: 0,
@@ -439,15 +439,17 @@ async fn data_loop(
         )
         .draw(&mut display)
         .unwrap();
-        Timer::after_nanos(1).await;
         display.flush().unwrap();
 
         let data = SensorsData {
             temperature: temperature_average.median(),
             humidity: humidity_average.median(),
+            co2: c02_average.median(),
             eco2: eco2_average.median(),
             tvoc: tvoc_average.median(),
         };
-        SENSOR_CHANNEL.send(data).await;
+        if let Err(_err) = SENSOR_CHANNEL.try_send(data) {
+            SENSOR_CHANNEL.clear();
+        };
     }
 }

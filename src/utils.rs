@@ -53,7 +53,6 @@ impl<'a,const N: usize, T: Copy + PartialOrd + Default> RollingMedian<'a, N, T> 
         let mut sorted = self.buffer;
         let count = if self.filled { N } else { self.index };
 
-        // simple insertion sort for embedded-friendliness
         for i in 1..count {
             let mut j = i;
             while j > 0 && sorted[j] < sorted[j - 1] {
